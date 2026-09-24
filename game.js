@@ -43,11 +43,16 @@ async function assets() {
   // Load optimized mirage (22MB draco+webp) - replaces old world cubes and fence/container props
   const mirage = await loader.loadAsync('/assets/models/mirage.glb');
   mirage.scene.traverse((c)=>{ if(c.isMesh){ c.castShadow = c.receiveShadow = true; if(c.material.map) c.material.map.colorSpace = THREE.SRGBColorSpace; }});
-  // Center and scale mirage to match arena (original bbox ~150x150, floor 160x160)
+  // Center mirage on X/Z, keep Y so floor aligns with player feet
   const box = new THREE.Box3().setFromObject(mirage.scene);
-  const center = box.getCenter(new THREE.Vector3()); mirage.scene.position.sub(center); mirage.scene.position.y -= box.min.y - center.y;
-  mirage.scene.position.y += 0.05; // slight lift to avoid z-fighting with floor
+  const center = box.getCenter(new THREE.Vector3());
+  mirage.scene.position.x -= center.x;
+  mirage.scene.position.z -= center.z;
+  // Lift so lowest point is at y=0.1 (avoid z-fighting), player will be placed on floor
+  mirage.scene.position.y = -box.min.y + 0.1;
   scene.add(mirage.scene);
+  // Place player on mirage floor (was below map)
+  player.position.set(0, mirage.scene.position.y + 1.6, 20);
   // Generate collision from mirage meshes (sample every 2nd mesh for performance)
   let c = 0; mirage.scene.traverse((o)=>{ if(o.isMesh){ if(c++ % 3 === 0){ const b = new THREE.Box3().setFromObject(o); if(b.getSize(new THREE.Vector3()).length() > 1.5) blocks.push(b); }}});
   // Minimal cover props (kept, old container/fence/street/car/pipes removed - replaced by mirage)
@@ -59,7 +64,7 @@ async function assets() {
   game.ready = true; spawnWave(); hud();
 }
 let weapon;
-function enemy(x,z,n) { const t=templates.get('zombie'), model=cloneSkinned(t.root); fit(model,1.78); model.position.set(x,0,z); const e={model,health:100 + game.round * 9,cooldown:0,speed:1.05+n*.035+game.round*.025,live:true,deadFor:null,mixer:null,clips:t.clips,action:null}; model.traverse(c=>{if(c.isMesh)c.userData.enemy=e}); scene.add(model); if(t.clips.length){const m=new THREE.AnimationMixer(model);e.mixer=m;mixers.push(m);enemyAction(e,'Walk')} enemies.push(e); }
+function enemy(x,z,n) { const t=templates.get('zombie'), model=cloneSkinned(t.root); fit(model,1.78); const y = player.position.y - 1.6 + 0.05; model.position.set(x,y,z); const e={model,health:100 + game.round * 9,cooldown:0,speed:1.05+n*.035+game.round*.025,live:true,deadFor:null,mixer:null,clips:t.clips,action:null}; model.traverse(c=>{if(c.isMesh)c.userData.enemy=e}); scene.add(model); if(t.clips.length){const m=new THREE.AnimationMixer(model);e.mixer=m;mixers.push(m);enemyAction(e,'Walk')} enemies.push(e); }
 function spawnWave() { game.round++; const count = 4 + game.round * 2; const points = [[-28,-20],[28,-20],[-29,18],[28,18],[-8,-23],[10,-23],[-29,0],[29,0],[-18,10],[20,10]]; for(let i=0;i<count;i++){const p=points[i%points.length]; enemy(p[0]+(Math.random()-.5)*3,p[1]+(Math.random()-.5)*3,i)} game.reserve=Math.min(999,game.reserve+90); game.health=Math.min(game.maxHealth,game.health+24); game.waveTimer=null; ui.objective.textContent=`Ronda ${game.round}: resiste la horda`; notify(`RONDA ${game.round}`,2.5); hud(); }
 function enemyAction(enemy, name, once = false) { const clip = enemy.clips.find((item) => item.name.includes(name)); if (!clip || !enemy.mixer) return; const next = enemy.mixer.clipAction(clip); if (enemy.action !== next) { next.reset(); next.setLoop(once ? THREE.LoopOnce : THREE.LoopRepeat, once ? 1 : Infinity); next.clampWhenFinished = once; next.fadeIn(.12).play(); if (enemy.action) enemy.action.fadeOut(.12); enemy.action = next; } }
 function notify(text, seconds=1.4) { ui.notice.textContent=text; ui.notice.classList.add('show'); game.noticeTime=seconds; }
