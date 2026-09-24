@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
 import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
 
 const $ = (q) => document.querySelector(q);
@@ -10,6 +11,9 @@ const scene = new THREE.Scene(); scene.background = new THREE.Color('#76808a'); 
 const camera = new THREE.PerspectiveCamera(72, 1, .08, 45); scene.add(camera);
 const player = new THREE.Group(); player.position.set(0, 0, 20); scene.add(player);
 const loader = new GLTFLoader(), clock = new THREE.Clock(), raycaster = new THREE.Raycaster();
+const dracoLoader = new DRACOLoader();
+dracoLoader.setDecoderPath('https://www.gstatic.com/draco/versioned/decoders/1.5.6/');
+loader.setDRACOLoader(dracoLoader);
 const keys = new Set(), templates = new Map(), enemies = [], mixers = [], blocks = [];
 const game = { live: false, ready: false, health: 150, maxHealth: 150, ammo: 30, reserve: 120, reloading: false, lastShot: 0, noticeTime: 0, quality: 0, yaw: 0, pitch: -.13, round: 0, waveTimer: null, recoil: 0 };
 const profiles = [{ name: 'BAJA', ratio: .75, far: 45, shadows: false }, { name: 'MEDIA', ratio: 1, far: 65, shadows: true }, { name: 'ALTA', ratio: 1.35, far: 90, shadows: true }];
@@ -20,18 +24,10 @@ const rustyMetal = texture('/assets/textures/rusty-metal-1k.jpg', [5, 2]);
 function mat(color, map) { const options = { color, roughness: .82, metalness: .08 }; if (map) options.map = map; return new THREE.MeshStandardMaterial(options); }
 function cube(size, pos, opts = {}) { const m = new THREE.Mesh(new THREE.BoxGeometry(...size), mat(opts.color || '#6f746f', opts.map)); m.position.set(...pos); m.castShadow = m.receiveShadow = true; scene.add(m); if (opts.block !== false) blocks.push(new THREE.Box3().setFromObject(m)); return m; }
 function world() {
-  const floor = new THREE.Mesh(new THREE.PlaneGeometry(140, 140), mat('#aaa8a0', concrete)); floor.rotation.x = -Math.PI / 2; floor.receiveShadow = true; scene.add(floor);
-  // CC0 industrial-city layout: a central yard linked to warehouse, loading dock and tank farm lanes.
-  cube([69, 10, .7], [0, 5, -27], { map: rustyMetal }); cube([69, 10, .7], [0, 5, 27], { map: rustyMetal });
-  cube([.7, 10, 55], [-34, 5, 0], { map: rustyMetal }); cube([.7, 10, 55], [34, 5, 0], { map: rustyMetal });
-  // Warehouse on the west side: its broken walls leave two tactical routes through the building.
-  cube([.7, 6, 14], [-13, 3, -19], { map: rustyMetal }); cube([.7, 6, 13], [-13, 3, 8], { map: rustyMetal });
-  cube([20, 6, .7], [-23, 3, -12], { map: rustyMetal }); cube([20, 6, .7], [-23, 3, 19], { map: rustyMetal });
-  cube([11, .45, 15], [-23, 5.8, -20], { map: rustyMetal, block: false }); cube([11, .45, 15], [-23, 5.8, 19], { map: rustyMetal, block: false });
-  // East loading dock and central machinery form a loop rather than a single open square.
-  cube([15, 2, 3], [17, 1, 13], { color: '#515a58' }); cube([15, 2, 3], [17, 1, -13], { color: '#515a58' });
-  cube([3, 2.4, 12], [6, 1.2, 0], { color: '#555d5a' }); cube([3, 2.4, 10], [-4, 1.2, -12], { color: '#555d5a' });
-  [[-20, 3],[-25,-4],[-17,-6],[15,4],[25,2],[23,-5],[13,-19],[3,17],[-6,16]].forEach(([x,z]) => cube([2.6, 1.2, 2.6], [x,.6,z], { color:'#5d615b' }));
+  // Base floor - mirage provides detailed geometry, this is fallback
+  const floor = new THREE.Mesh(new THREE.PlaneGeometry(160, 160), mat('#aaa8a0', concrete)); floor.rotation.x = -Math.PI / 2; floor.receiveShadow = true; scene.add(floor);
+  // Old procedural walls removed - replaced by mirage.glb (22MB optimized, draco+webp)
+  // Keep minimal collision blocks for mirage to generate from GLB meshes
 }
 let sun;
 function light() { scene.add(new THREE.HemisphereLight('#9caeb8','#252a25',2.1)); sun = new THREE.DirectionalLight('#ffe0ad',2.6); sun.position.set(-22,29,10); sun.castShadow = true; sun.shadow.camera.left=-30; sun.shadow.camera.right=30; sun.shadow.camera.top=30; sun.shadow.camera.bottom=-30; scene.add(sun); const spot = new THREE.SpotLight('#e3bc72',160,28,.68,.45,1.3); spot.position.set(0,9,-8); spot.target.position.set(0,0,-4); scene.add(spot,spot.target); }
@@ -39,12 +35,27 @@ async function load(name, path) { const g = await loader.loadAsync(path); g.scen
 function fit(o, h) { const b = new THREE.Box3().setFromObject(o), s = b.getSize(new THREE.Vector3()); o.scale.multiplyScalar(h / Math.max(s.y,.001)); o.position.y -= new THREE.Box3().setFromObject(o).min.y; }
 function instance(name, pos, height, rot = 0) { const t=templates.get(name); if (!t) return null; const o=cloneSkinned(t.root); fit(o,height); o.position.add(new THREE.Vector3(...pos)); o.rotation.y=rot; scene.add(o); return o; }
 async function assets() {
-  await Promise.all([['container','container.glb'],['structure','container-structure.glb'],['fence','metal-fence.glb'],['crate','crate.glb'],['pallet','pallet.glb'],['barrel','barrel.glb'],['pipes','pipes.glb'],['street','street-light.glb'],['car','broken-car.glb'],['rifle','player-rifle.glb'],['player','player.glb'],['zombie','zombie.glb']].map(([n,f])=>load(n,`/assets/models/${f}`)));
-  instance('container',[-26,0,7],3.2,Math.PI/2); instance('container',[-26,0,11],3.2,Math.PI/2); instance('container',[-19,0,-20],3.2,Math.PI/2); instance('structure',[22,0,15],4.1,-Math.PI/2); instance('fence',[-33,0,5],2.6,Math.PI/2); instance('fence',[33,0,-1],2.6,-Math.PI/2); instance('car',[20,0,-20],1.4,.3); instance('pipes',[-10,0,-20],2.1); instance('street',[-30,0,-15],4.7); instance('street',[29,0,18],4.7,Math.PI);
-  [[-20,10],[-18,10],[10,-18],[12,-18],[25,9],[27,9],[4,18],[-4,-7]].forEach(([x,z])=>instance('crate',[x,0,z],1.1,Math.random()*Math.PI)); [[-28,2],[12,-10],[-18,3],[24,16]].forEach(([x,z])=>instance('pallet',[x,0,z],.25,Math.random()*Math.PI)); [[-8,-20],[15,5],[26,-16],[-28,-10],[4,15]].forEach(([x,z])=>instance('barrel',[x,0,z],1));
+  // Load character/weapon templates (keep) + mirage map (replaces old industrial yard)
+  await Promise.all([
+    ['rifle','player-rifle.glb'],['player','player.glb'],['zombie','zombie.glb'],
+    ['crate','crate.glb'],['barrel','barrel.glb'] // keep minimal cover props
+  ].map(([n,f])=>load(n,`/assets/models/${f}`)));
+  // Load optimized mirage (22MB draco+webp) - replaces old world cubes and fence/container props
+  const mirage = await loader.loadAsync('/assets/models/mirage.glb');
+  mirage.scene.traverse((c)=>{ if(c.isMesh){ c.castShadow = c.receiveShadow = true; if(c.material.map) c.material.map.colorSpace = THREE.SRGBColorSpace; }});
+  // Center and scale mirage to match arena (original bbox ~150x150, floor 160x160)
+  const box = new THREE.Box3().setFromObject(mirage.scene);
+  const center = box.getCenter(new THREE.Vector3()); mirage.scene.position.sub(center); mirage.scene.position.y -= box.min.y - center.y;
+  mirage.scene.position.y += 0.05; // slight lift to avoid z-fighting with floor
+  scene.add(mirage.scene);
+  // Generate collision from mirage meshes (sample every 2nd mesh for performance)
+  let c = 0; mirage.scene.traverse((o)=>{ if(o.isMesh){ if(c++ % 3 === 0){ const b = new THREE.Box3().setFromObject(o); if(b.getSize(new THREE.Vector3()).length() > 1.5) blocks.push(b); }}});
+  // Minimal cover props (kept, old container/fence/street/car/pipes removed - replaced by mirage)
+  [[-8,-20],[15,5],[26,-16]].forEach(([x,z])=>instance('barrel',[x,0,z],1));
+  [[-20,10],[10,-18],[25,9]].forEach(([x,z])=>instance('crate',[x,0,z],1.1,Math.random()*Math.PI));
   const soldier = instance('player',[0,0,0],1.76); soldier.position.set(0,0,0); soldier.visible = false; player.add(soldier);
-  // The body stays in the world for gameplay, while the rifle is rendered from the player's eyes.
   weapon=instance('rifle',[0,0,0],.34); weapon.position.set(.28,-.29,-.5); weapon.rotation.set(-.08,Math.PI/2,.02); camera.add(weapon);
+  // Adjust spawn points for larger mirage arena
   game.ready = true; spawnWave(); hud();
 }
 let weapon;
