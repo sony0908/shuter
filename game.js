@@ -10,11 +10,12 @@ renderer.outputColorSpace = THREE.SRGBColorSpace; renderer.shadowMap.enabled = f
 const scene = new THREE.Scene(); scene.background = new THREE.Color('#76808a'); scene.fog = new THREE.FogExp2('#78828a', .026);
 const camera = new THREE.PerspectiveCamera(72, 1, .08, 45); scene.add(camera);
 const player = new THREE.Group(); player.position.set(0, 0, 20); scene.add(player);
-const loader = new GLTFLoader(), clock = new THREE.Clock(), raycaster = new THREE.Raycaster();
+const loader = new GLTFLoader(), clock = new THREE.Clock(), raycaster = new THREE.Raycaster(), groundRaycaster = new THREE.Raycaster();
 const dracoLoader = new DRACOLoader();
 dracoLoader.setDecoderPath('https://www.gstatic.com/draco/versioned/decoders/1.5.6/');
 loader.setDRACOLoader(dracoLoader);
-const keys = new Set(), templates = new Map(), enemies = [], mixers = [], blocks = [];
+const keys = new Set(), templates = new Map(), enemies = [], mixers = [], blocks = [], groundMeshes = [], groundSamples = new Map();
+let arenaBounds = null, mapFloorY = .1;
 const game = { live: false, ready: false, health: 150, maxHealth: 150, ammo: 30, reserve: 120, reloading: false, lastShot: 0, noticeTime: 0, quality: 0, yaw: 0, pitch: -.13, round: 0, waveTimer: null, recoil: 0 };
 const profiles = [{ name: 'BAJA', ratio: .75, far: 45, shadows: false }, { name: 'MEDIA', ratio: 1, far: 65, shadows: true }, { name: 'ALTA', ratio: 1.35, far: 90, shadows: true }];
 
@@ -34,6 +35,9 @@ function light() { scene.add(new THREE.HemisphereLight('#9caeb8','#252a25',2.1))
 async function load(name, path) { const g = await loader.loadAsync(path); g.scene.traverse((c) => { if (c.isMesh) { c.castShadow = c.receiveShadow = true; if (c.material.map) c.material.map.colorSpace = THREE.SRGBColorSpace; } }); templates.set(name, { root:g.scene, clips:g.animations }); }
 function fit(o, h) { const b = new THREE.Box3().setFromObject(o), s = b.getSize(new THREE.Vector3()); o.scale.multiplyScalar(h / Math.max(s.y,.001)); o.position.y -= new THREE.Box3().setFromObject(o).min.y; }
 function instance(name, pos, height, rot = 0) { const t=templates.get(name); if (!t) return null; const o=cloneSkinned(t.root); fit(o,height); o.position.add(new THREE.Vector3(...pos)); o.rotation.y=rot; scene.add(o); return o; }
+function mapGroundAt(x,z) { const key=`${Math.round(x*2)},${Math.round(z*2)}`; if(groundSamples.has(key))return groundSamples.get(key); const origin=new THREE.Vector3(x,arenaBounds.max.y+3,z); groundRaycaster.set(origin,new THREE.Vector3(0,-1,0)); const hit=groundRaycaster.intersectObjects(groundMeshes,false).find((item)=>item.face&&item.face.normal.clone().transformDirection(item.object.matrixWorld).y>.45); const y=hit?hit.point.y:mapFloorY; groundSamples.set(key,y); return y; }
+function addMapCollider(object) { const b=new THREE.Box3().setFromObject(object), s=b.getSize(new THREE.Vector3()); const isGround=s.y<1.2&&s.x>1.5&&s.z>1.5; const isVertical=s.y>.8&&s.x>.15&&s.z>.15; const isLocal=s.x<14&&s.z<14; const isLongWall=Math.min(s.x,s.z)<2.4; if(isGround)groundMeshes.push(object); if(isVertical&&(isLocal||isLongWall))blocks.push(b); }
+function addPropCollider(prop) { if(prop)blocks.push(new THREE.Box3().setFromObject(prop)); }
 async function assets() {
   // Load character/weapon templates (keep) + mirage map (replaces old industrial yard)
   await Promise.all([
@@ -50,30 +54,31 @@ async function assets() {
   mirage.scene.position.z -= center.z;
   // Lift so lowest point is at y=0.1 (avoid z-fighting), player will be placed on floor
   mirage.scene.position.y = -box.min.y + 0.1;
-  scene.add(mirage.scene);
-  // Place player on mirage floor (was below map)
-  player.position.set(0, mirage.scene.position.y + 1.6, 20);
-  // Use only local vertical meshes as blockers. The map floor and large combined meshes
-  // have an X/Z box covering the entire arena, which would otherwise trap the player.
-  let c = 0; mirage.scene.traverse((o)=>{ if(o.isMesh && c++ % 3 === 0){ const b = new THREE.Box3().setFromObject(o), s = b.getSize(new THREE.Vector3()); const isSolidProp = s.y > .8 && s.y < 10 && s.x < 14 && s.z < 14; if(isSolidProp) blocks.push(b); }});
+  scene.add(mirage.scene); mirage.scene.updateMatrixWorld(true);
+  arenaBounds = new THREE.Box3().setFromObject(mirage.scene); mapFloorY = mirage.scene.position.y;
+  // Build collision volumes from every map mesh. Floors are sampled vertically while
+  // vertical props and thin walls become solid boxes, so the player neither floats nor
+  // walks through the environment.
+  mirage.scene.traverse((o)=>{ if(o.isMesh)addMapCollider(o); });
+  player.position.set(0,mapGroundAt(0,20),20);
   // Minimal cover props (kept, old container/fence/street/car/pipes removed - replaced by mirage)
-  [[-8,-20],[15,5],[26,-16]].forEach(([x,z])=>instance('barrel',[x,0,z],1));
-  [[-20,10],[10,-18],[25,9]].forEach(([x,z])=>instance('crate',[x,0,z],1.1,Math.random()*Math.PI));
+  [[-8,-20],[15,5],[26,-16]].forEach(([x,z])=>addPropCollider(instance('barrel',[x,mapGroundAt(x,z),z],1)));
+  [[-20,10],[10,-18],[25,9]].forEach(([x,z])=>addPropCollider(instance('crate',[x,mapGroundAt(x,z),z],1.1,Math.random()*Math.PI)));
   const soldier = instance('player',[0,0,0],1.76); soldier.position.set(0,0,0); soldier.visible = false; player.add(soldier);
   weapon=instance('rifle',[0,0,0],.34); weapon.position.set(.28,-.29,-.5); weapon.rotation.set(-.08,Math.PI/2,.02); camera.add(weapon);
   // Adjust spawn points for larger mirage arena
   game.ready = true; spawnWave(); hud();
 }
 let weapon;
-function enemy(x,z,n) { const t=templates.get('zombie'), model=cloneSkinned(t.root); fit(model,1.78); const y = player.position.y - 1.6 + 0.05; model.position.set(x,y,z); const e={model,health:100 + game.round * 9,cooldown:0,speed:1.05+n*.035+game.round*.025,live:true,deadFor:null,mixer:null,clips:t.clips,action:null}; model.traverse(c=>{if(c.isMesh)c.userData.enemy=e}); scene.add(model); if(t.clips.length){const m=new THREE.AnimationMixer(model);e.mixer=m;mixers.push(m);enemyAction(e,'Walk')} enemies.push(e); }
+function enemy(x,z,n) { const t=templates.get('zombie'), model=cloneSkinned(t.root); fit(model,1.78); model.position.set(x,mapGroundAt(x,z)+.05,z); const e={model,health:100 + game.round * 9,cooldown:0,speed:1.05+n*.035+game.round*.025,live:true,deadFor:null,mixer:null,clips:t.clips,action:null}; model.traverse(c=>{if(c.isMesh)c.userData.enemy=e}); scene.add(model); if(t.clips.length){const m=new THREE.AnimationMixer(model);e.mixer=m;mixers.push(m);enemyAction(e,'Walk')} enemies.push(e); }
 function spawnWave() { game.round++; const count = 4 + game.round * 2; const points = [[-28,-20],[28,-20],[-29,18],[28,18],[-8,-23],[10,-23],[-29,0],[29,0],[-18,10],[20,10]]; for(let i=0;i<count;i++){const p=points[i%points.length]; enemy(p[0]+(Math.random()-.5)*3,p[1]+(Math.random()-.5)*3,i)} game.reserve=Math.min(999,game.reserve+90); game.health=Math.min(game.maxHealth,game.health+24); game.waveTimer=null; ui.objective.textContent=`Ronda ${game.round}: resiste la horda`; notify(`RONDA ${game.round}`,2.5); hud(); }
 function enemyAction(enemy, name, once = false) { const clip = enemy.clips.find((item) => item.name.includes(name)); if (!clip || !enemy.mixer) return; const next = enemy.mixer.clipAction(clip); if (enemy.action !== next) { next.reset(); next.setLoop(once ? THREE.LoopOnce : THREE.LoopRepeat, once ? 1 : Infinity); next.clampWhenFinished = once; next.fadeIn(.12).play(); if (enemy.action) enemy.action.fadeOut(.12); enemy.action = next; } }
 function notify(text, seconds=1.4) { ui.notice.textContent=text; ui.notice.classList.add('show'); game.noticeTime=seconds; }
 function hud() { ui.health.textContent=Math.ceil(Math.max(0,game.health)); ui.healthBar.style.width=`${Math.max(0,game.health / game.maxHealth * 100)}%`; ui.healthBar.style.background=game.health<45?'#d66554':'#b7c98a'; ui.ammo.textContent=`${game.ammo} / ${game.reserve}`; ui.enemies.textContent=`ENEMIGOS ${enemies.filter(e=>e.live).length}`; }
 function shoot() { if(!game.live||game.reloading)return; const n=performance.now(); if(n-game.lastShot<110)return; if(!game.ammo)return reload(); game.lastShot=n;game.ammo--;game.recoil=.075;raycaster.setFromCamera(new THREE.Vector2(),camera); const hit=raycaster.intersectObjects(enemies.filter(e=>e.live).map(e=>e.model),true)[0]; if(hit){let o=hit.object;while(o&&!o.userData.enemy)o=o.parent;if(o?.userData.enemy){const e=o.userData.enemy;e.health-=34;enemyAction(e,e.health<=0?'Die':'Hit_reaction',e.health<=0);ui.hit.classList.add('show');setTimeout(()=>ui.hit.classList.remove('show'),80);if(e.health<=0)e.live=false}}hud(); }
 function reload(){if(game.reloading||game.ammo===30||!game.reserve)return;game.reloading=true;notify('RECARGANDO...',1.1);setTimeout(()=>{const a=Math.min(30-game.ammo,game.reserve);game.ammo+=a;game.reserve-=a;game.reloading=false;hud()},1100)}
-function canMove(p){if(Math.abs(p.x)>32.15||p.z>25.15||p.z<-25.15)return false;const radius=.38;return !blocks.some(b=>p.x+radius>b.min.x&&p.x-radius<b.max.x&&p.z+radius>b.min.z&&p.z-radius<b.max.z);}
-function playerUpdate(dt){if(!game.live)return;const d=new THREE.Vector3(),f=new THREE.Vector3(-Math.sin(game.yaw),0,-Math.cos(game.yaw)),r=new THREE.Vector3(Math.cos(game.yaw),0,-Math.sin(game.yaw)),forward=keys.has('KeyW')||keys.has('ArrowUp'),back=keys.has('KeyS')||keys.has('ArrowDown'),left=keys.has('KeyA')||keys.has('ArrowLeft'),right=keys.has('KeyD')||keys.has('ArrowRight'),speed=(keys.has('ShiftLeft')||keys.has('ShiftRight'))?7.2:4.3;if(forward)d.add(f);if(back)d.sub(f);if(left)d.sub(r);if(right)d.add(r);if(d.lengthSq()){d.normalize().multiplyScalar(speed*dt);const xStep=player.position.clone();xStep.x+=d.x;if(canMove(xStep))player.position.x=xStep.x;const zStep=player.position.clone();zStep.z+=d.z;if(canMove(zStep))player.position.z=zStep.z}player.rotation.y=game.yaw;}
+function canMove(p){const radius=.38,bodyBottom=p.y+.12,bodyTop=p.y+1.5;if(!arenaBounds||p.x-radius<arenaBounds.min.x||p.x+radius>arenaBounds.max.x||p.z-radius<arenaBounds.min.z||p.z+radius>arenaBounds.max.z)return false;return !blocks.some(b=>p.x+radius>b.min.x&&p.x-radius<b.max.x&&p.z+radius>b.min.z&&p.z-radius<b.max.z&&b.max.y>bodyBottom&&b.min.y<bodyTop);}
+function playerUpdate(dt){if(!game.live)return;const d=new THREE.Vector3(),f=new THREE.Vector3(-Math.sin(game.yaw),0,-Math.cos(game.yaw)),r=new THREE.Vector3(Math.cos(game.yaw),0,-Math.sin(game.yaw)),forward=keys.has('KeyW')||keys.has('ArrowUp'),back=keys.has('KeyS')||keys.has('ArrowDown'),left=keys.has('KeyA')||keys.has('ArrowLeft'),right=keys.has('KeyD')||keys.has('ArrowRight'),speed=(keys.has('ShiftLeft')||keys.has('ShiftRight'))?7.2:4.3;if(forward)d.add(f);if(back)d.sub(f);if(left)d.sub(r);if(right)d.add(r);if(d.lengthSq()){d.normalize().multiplyScalar(speed*dt);const xStep=player.position.clone();xStep.x+=d.x;xStep.y=mapGroundAt(xStep.x,xStep.z);if(canMove(xStep))player.position.copy(xStep);const zStep=player.position.clone();zStep.z+=d.z;zStep.y=mapGroundAt(zStep.x,zStep.z);if(canMove(zStep))player.position.copy(zStep)}player.rotation.y=game.yaw;}
 function followCamera(){camera.position.copy(player.position).add(new THREE.Vector3(0,1.56,0));const forward=new THREE.Vector3(-Math.sin(game.yaw),0,-Math.cos(game.yaw));const target=player.position.clone().add(forward.multiplyScalar(10));target.y+=1.56+Math.sin(game.pitch)*8;camera.lookAt(target);}
 function ai(dt){for(const e of enemies){if(!e.live){if(e.deadFor!==null)e.deadFor+=dt;continue}const v=new THREE.Vector3().subVectors(player.position,e.model.position);v.y=0;const dis=v.length();e.model.lookAt(player.position.x,e.model.position.y,player.position.z);if(dis>5.2)e.model.position.add(v.normalize().multiplyScalar(e.speed*dt));e.cooldown-=dt;if(dis<10&&e.cooldown<0){e.cooldown=2.2+Math.random()*.8;enemyAction(e,'Attack');setTimeout(()=>e.live&&enemyAction(e,'Walk'),450);game.health-=3+Math.random()*3;if(game.health<=0){game.health=0;game.live=false;document.exitPointerLock();notify('MISIÓN FALLIDA',5)}}}hud()}
 function waves(dt){if(!game.ready)return; for(let i=enemies.length-1;i>=0;i--){const e=enemies[i];if(!e.live&&e.deadFor===null)e.deadFor=0;if(e.deadFor>25){scene.remove(e.model);enemies.splice(i,1)}} if(!enemies.some(e=>e.live)){if(game.waveTimer===null){game.waveTimer=60;ui.objective.textContent='Zona limpia: siguiente horda en 60 s';notify('SIGUIENTE HORDA EN 60',3)}else{game.waveTimer-=dt;const seconds=Math.max(0,Math.ceil(game.waveTimer));ui.objective.textContent=`Zona limpia: siguiente horda en ${seconds} s`;if(game.waveTimer<=0)spawnWave()}}}
