@@ -53,8 +53,9 @@ async function assets() {
   scene.add(mirage.scene);
   // Place player on mirage floor (was below map)
   player.position.set(0, mirage.scene.position.y + 1.6, 20);
-  // Generate collision from mirage meshes (sample every 2nd mesh for performance)
-  let c = 0; mirage.scene.traverse((o)=>{ if(o.isMesh){ if(c++ % 3 === 0){ const b = new THREE.Box3().setFromObject(o); if(b.getSize(new THREE.Vector3()).length() > 1.5) blocks.push(b); }}});
+  // Use only local vertical meshes as blockers. The map floor and large combined meshes
+  // have an X/Z box covering the entire arena, which would otherwise trap the player.
+  let c = 0; mirage.scene.traverse((o)=>{ if(o.isMesh && c++ % 3 === 0){ const b = new THREE.Box3().setFromObject(o), s = b.getSize(new THREE.Vector3()); const isSolidProp = s.y > .8 && s.y < 10 && s.x < 14 && s.z < 14; if(isSolidProp) blocks.push(b); }});
   // Minimal cover props (kept, old container/fence/street/car/pipes removed - replaced by mirage)
   [[-8,-20],[15,5],[26,-16]].forEach(([x,z])=>instance('barrel',[x,0,z],1));
   [[-20,10],[10,-18],[25,9]].forEach(([x,z])=>instance('crate',[x,0,z],1.1,Math.random()*Math.PI));
