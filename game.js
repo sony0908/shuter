@@ -14,6 +14,9 @@ const loader = new GLTFLoader(), clock = new THREE.Clock(), raycaster = new THRE
 const dracoLoader = new DRACOLoader();
 dracoLoader.setDecoderPath('https://www.gstatic.com/draco/versioned/decoders/1.5.6/');
 loader.setDRACOLoader(dracoLoader);
+const worker = new Worker(new URL('./src/worker.js', import.meta.url), {type: 'module'});
+let workerReady = false;
+worker.onmessage = (e)=>{ if(e.data.type==='inited') workerReady=true; };
 const keys = new Set(), templates = new Map(), enemies = [], mixers = [], blocks = [], wallMeshes = [], groundMeshes = [], groundSamples = new Map(), wallSamples = new Map();
 let arenaBounds = null, mapFloorY = .1;
 const game = { live: false, ready: false, health: 150, maxHealth: 150, ammo: 30, reserve: 120, reloading: false, lastShot: 0, noticeTime: 0, quality: 0, yaw: 0, pitch: -.13, round: 0, waveTimer: null, recoil: 0 };
@@ -60,8 +63,22 @@ async function assets() {
   // plane here prevents ceilings, awnings and decorative meshes from lifting players.
   mapFloorY = mirage.scene.position.y - 4.2672 + .08;
   // Build coarse boxes plus triangle-ray wall tests from the real map geometry.
-  mirage.scene.traverse((o)=>{ if(o.isMesh)addMapCollider(o); });
-  player.position.copy(findClearSpawn(0,20));
+   mirage.scene.traverse((o)=>{ if(o.isMesh)addMapCollider(o); });
+   // Offload heavy ray data to worker (fase 2) - serializa triángulos para ground/wall
+   try {
+     const extractTris = (meshes)=>meshes.map(m=>{
+       const g=m.geometry, pos=g.attributes.position, idx=g.index;
+       const tris=[]; const vA=new THREE.Vector3(), vB=new THREE.Vector3(), vC=new THREE.Vector3();
+       const getV=(i,out)=>{ out.fromBufferAttribute(pos,i).applyMatrix4(m.matrixWorld); };
+       if(idx){ for(let i=0;i<idx.count;i+=3){ getV(idx.getX(i),vA); getV(idx.getX(i+1),vB); getV(idx.getX(i+2),vC); const e1=vB.clone().sub(vA), e2=vC.clone().sub(vA), n=e1.clone().cross(e2).normalize(); tris.push({v0:[vA.x,vA.y,vA.z],v1:[vB.x,vB.y,vB.z],v2:[vC.x,vC.y,vC.z],normal:[n.x,n.y,n.z]}); } }
+       else { for(let i=0;i<pos.count;i+=3){ getV(i,vA); getV(i+1,vB); getV(i+2,vC); const e1=vB.clone().sub(vA), e2=vC.clone().sub(vA), n=e1.clone().cross(e2).normalize(); tris.push({v0:[vA.x,vA.y,vA.z],v1:[vB.x,vB.y,vB.z],v2:[vC.x,vC.y,vC.z],normal:[n.x,n.y,n.z]}); } }
+       return tris;
+     }).flat();
+     const groundTris = extractTris(groundMeshes);
+     const wallTris = extractTris(wallMeshes);
+     worker.postMessage({type:'init', data:{groundTris, wallTris}});
+   } catch(e){ console.warn('worker init failed', e); }
+   player.position.copy(findClearSpawn(0,20));
   // Minimal cover props (kept, old container/fence/street/car/pipes removed - replaced by mirage)
   [[-8,-20],[15,5],[26,-16]].forEach(([x,z])=>addPropCollider(instance('barrel',[x,mapGroundAt(x,z),z],1)));
   [[-20,10],[10,-18],[25,9]].forEach(([x,z])=>addPropCollider(instance('crate',[x,mapGroundAt(x,z),z],1.1,Math.random()*Math.PI)));
